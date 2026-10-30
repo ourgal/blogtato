@@ -1,0 +1,143 @@
+name: Build and release blogtato binaries
+
+# Builds blogtato from kantord/blogtato and attaches binaries to a release
+# in this repository.
+#
+# Triggers:
+#   - workflow_dispatch: run manually from the Actions tab. Builds the latest
+#     upstream main and creates a release named after the upstream version
+#     (e.g. v0.1.27), creating the tag if it does not exist yet.
+#   - push of a v* tag: builds the matching upstream tag (so pushing v0.1.27
+#     builds blogtato v0.1.27) and uploads the binaries to that tag's release.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: kantord/blogtato
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Check out blogtato source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          # On tag pushes, build exactly the matching upstream tag;
+          # otherwise build the upstream default branch.
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+      - name: Determine version and release tag
+        id: meta
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building blogtato $VERSION, release tag: $TAG"
+
+  build:
+    needs: prep
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prep.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Check out blogtato source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          DIR="blogtato-v${VERSION}-${PLATFORM}"
+          mkdir "$DIR"
+          cp "target/${{ matrix.target }}/release/blog" "$DIR/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$DIR/"
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        run: |
+          DIR="blogtato-v${VERSION}-${PLATFORM}"
+          mkdir "$DIR"
+          cp "target/${{ matrix.target }}/release/blog.exe" "$DIR/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$DIR/"
+          7z a "${DIR}.zip" "$DIR"
+          sha256sum "${DIR}.zip" > "${DIR}.zip.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blogtato-${{ matrix.platform }}-v${{ needs.prep.outputs.version }}
+          path: blogtato-v*-${{ matrix.platform }}.*
+          if-no-files-found: error
+
+  release:
+    needs: [prep, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release and upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prep.outputs.tag }}
+          name: blogtato ${{ needs.prep.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
