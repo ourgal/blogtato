@@ -94,6 +94,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
+        shell: bash
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -108,6 +109,7 @@ jobs:
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
+        shell: bash
         run: |
           DIR="blogtato-v${VERSION}-${PLATFORM}"
           mkdir "$DIR"
